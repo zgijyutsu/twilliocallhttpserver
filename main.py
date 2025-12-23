@@ -1,8 +1,14 @@
 import os
 from flask import Flask, request, Response
 from twilio.rest import Client
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
+
+# Google Cloud Runのようなリバースプロキシ環境を想定し、
+# X-Forwarded-Protoヘッダーを信頼するようにWSGIミドルウェアを設定
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
 
 # 認証チェックを行う関数
 def check_auth(username, password):
@@ -22,6 +28,12 @@ def authenticate():
 
 @app.route("/", methods=["GET", "POST"])
 def make_call():
+    # --- ここからHTTPS強制 ---
+    # 本番環境（デバッグモードOFF）かつ、リクエストがHTTPSでない場合はエラーを返す
+    if not app.debug and request.scheme != 'https':
+        return 'HTTPS is required.', 403
+    # ------------------------
+
     # --- ここから認証チェック ---
     auth = request.authorization
     if not auth or not check_auth(auth.username, auth.password):
@@ -32,7 +44,7 @@ def make_call():
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
     from_number = os.environ.get("FROM_PHONE_NUMBER")
-    
+
     # 宛先番号を文字列として取得
     to_numbers_str = os.environ.get("TO_PHONE_NUMBER", "")
 
