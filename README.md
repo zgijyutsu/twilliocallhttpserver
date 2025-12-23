@@ -17,35 +17,33 @@
 - `FROM_PHONE_NUMBER`: 発信元となるTwilioの電話番号
 - `TO_PHONE_NUMBER`: 発信先の電話番号（カンマ区切りで複数指定可能 例: `"+819012345678,+818012345678"`）
 
-## Dockerでの実行方法
+## Google Cloud Runでの実行方法
 
 1. **Dockerイメージのビルド:**
    ```bash
    docker build -t bulk-call-app .
    ```
+   （Google Cloudへプッシュする際は、`gcloud builds submit --tag gcr.io/your-project-id/bulk-call-app` のようなコマンドを使用します）
 
-2. **Dockerコンテナの実行:**
-   プレースホルダーの値を実際のものに置き換えて実行してください。
-   ```bash
-   docker run -d \
-     -p 8080:8080 \
-     -e APP_USER="your_username" \
-     -e APP_PASSWORD="your_password" \
-     -e TWILIO_ACCOUNT_SID="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
-     -e TWILIO_AUTH_TOKEN="your_auth_token" \
-     -e FROM_PHONE_NUMBER="+15017122661" \
-     -e TO_PHONE_NUMBER="+819012345678,+818012345678" \
-     --name bulk-call-container \
-     bulk-call-app
-   ```
+2. **Cloud Runへのデプロイ:**
+   コンソールまたはgcloudコマンドを使用して、ビルドしたイメージをCloud Runにデプロイします。
+   その際、上記の「必要な環境変数」をすべて設定してください。
 
 3. **アプリケーションのトリガー:**
-   ルートURL (`/`) に対してGETまたはPOSTリクエストを送信することで、電話発信が開始されます。
+   Cloud Runから提供されるHTTPS URLに対して、GETまたはPOSTリクエストを送信することで、電話発信が開始されます。
    ```bash
-   curl -u "your_username:your_password" http://localhost:8080/
+   curl -u "your_username:your_password" https://your-cloud-run-service-url/
    ```
 
 ## セキュリティに関する考慮事項
 
-このアプリケーションはHTTP Basic認証を使用しています。暗号化されていない通信路上では安全ではありません。
-TLS暗号化(HTTPS)を提供するリバースプロキシの背後で実行することを強く推奨します。
+このアプリケーションは、Google Cloud Runのようなリバースプロキシ環境での実行を前提として設計されています。
+
+### HTTPSの強制
+Google Cloud Runは、全てのサービスにTLS証明書を自動でプロビジョニングし、HTTPS通信を終端します。
+本アプリケーションは、リバースプロキシから送信される `X-Forwarded-Proto` ヘッダーを検証し、本番環境（非デバッグモード）ではHTTPS接続以外からのリクエストを自動的に拒否するよう設定されています。
+これにより、Basic認証の情報が暗号化されていないHTTP通信で送信されることを防ぎます。
+
+### ローカルでのテスト
+ローカル環境で `docker run` を使用してテストする場合、HTTPS強制は無効になります（Flaskのデバッグモードが有効なため）。
+その際のURLは `http://localhost:8080/` となります。
