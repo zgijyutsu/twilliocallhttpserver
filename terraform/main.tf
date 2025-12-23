@@ -8,6 +8,12 @@ terraform {
       version = ">= 4.0"
     }
   }
+  # GCSバックエンドの設定
+  backend "gcs" {
+    # バケット名はプロジェクトごとに一意にする必要があります。
+    # この値は後続の `gcloud` コマンドで動的に設定されます。
+    # 例: `gcloud terraform init --backend-config=bucket=your-tfstate-bucket`
+  }
 }
 
 # Google Cloud Provider の設定
@@ -16,7 +22,8 @@ provider "google" {
   region  = var.region
 }
 
-# 変数の定義
+# --- 変数の定義 ---
+
 variable "project_id" {
   description = "Google CloudプロジェクトID"
   type        = string
@@ -40,7 +47,30 @@ variable "artifact_repository" {
   default     = "cloud-run-source-deploy"
 }
 
+variable "github_repository" {
+  description = "GitHubリポジトリ (例: 'owner/repo')"
+  type        = string
+}
+
+# --- ローカル変数 ---
+locals {
+  # Terraform Stateを保存するGCSバケット名
+  tfstate_bucket_name = "${var.project_id}-tfstate"
+}
+
+
 # --- リソースの定義 ---
+
+# 0. Terraform Stateを保存するGCSバケット
+resource "google_storage_bucket" "tfstate" {
+  name          = local.tfstate_bucket_name
+  location      = var.region
+  force_destroy = false # 本番環境では false を推奨
+  uniform_bucket_level_access = true
+  versioning {
+    enabled = true
+  }
+}
 
 # 1. Artifact Registry (Dockerイメージ保存先)
 resource "google_artifact_registry_repository" "repo" {
@@ -50,23 +80,8 @@ resource "google_artifact_registry_repository" "repo" {
   description   = "Repository for Cloud Run Docker images"
 }
 
-# 2. Secret Manager (TwilioのトークンとSID用)
-resource "google_secret_manager_secret" "twilio_auth_token" {
-  secret_id = "TWILIO_AUTH_TOKEN"
-  replication {
-    automatic = true
-  }
-  # Note: シークレットの値は手動またはCI/CDで設定します
-}
 
-resource "google_secret_manager_secret" "twilio_account_sid" {
-  secret_id = "TWILIO_ACCOUNT_SID"
-  replication {
-    automatic = true
-  }
-}
-
-# 3. Cloud Run サービス
+# 2. Cloud Run サービス
 resource "google_cloud_run_v2_service" "twilio_service" {
   name     = var.service_name
   location = var.region
@@ -101,8 +116,42 @@ resource "google_cloud_run_v2_service" "twilio_service" {
           }
         }
       }
-      # その他の環境変数はCloud Runのコンソールまたはgcloudコマンドで設定することを推奨
-      # (APP_USER, APP_PASSWORD, FROM_PHONE_NUMBER, TO_PHONE_NUMBER)
+      env {
+        name = "APP_USER"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_user.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "APP_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_password.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "FROM_PHONE_NUMBER"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.from_phone_number.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "TO_PHONE_NUMBER"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.to_phone_number.secret_id
+            version = "latest"
+          }
+        }
+      }
     }
 
     # スケーリング設定 (例)
@@ -113,7 +162,7 @@ resource "google_cloud_run_v2_service" "twilio_service" {
   }
 }
 
-# 4. Cloud Runを誰でも呼び出せるようにするIAM設定 (Twilio Webhookなど)
+# 3. Cloud Runを誰でも呼び出せるようにするIAM設定 (Twilio Webhookなど)
 resource "google_cloud_run_v2_service_iam_member" "noauth" {
   location = google_cloud_run_v2_service.twilio_service.location
   name     = google_cloud_run_v2_service.twilio_service.name
@@ -141,9 +190,8 @@ resource "google_iam_workload_identity_pool_provider" "github_provider" {
     "attribute.actor"      = "assertion.actor"
     "attribute.repository" = "assertion.repository"
   }
-  # GitHubリポジトリを指定 (例: "your-github-org/your-repo-name")
-  # `attribute.repository` を使って特定のリポジトリに限定することが推奨されます
-  # attribute_condition = "attribute.repository == 'my-org/my-repo'"
+  # `attribute.repository` を使って特定のリポジトリに限定する
+  attribute_condition = "attribute.repository == '${var.github_repository}'"
 }
 
 # GitHub Actionsが使用するサービスアカウント
@@ -174,14 +222,18 @@ resource "google_project_iam_member" "iam_service_account_user" {
   member  = "serviceAccount:${google_service_account.github_actions_sa.email}"
 }
 
+# 4. Terraform State GCSバケットへの読み書き権限
+resource "google_storage_bucket_iam_member" "tfstate_rw" {
+  bucket = google_storage_bucket.tfstate.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.github_actions_sa.email}"
+}
 
 # WIFとサービスアカウントを紐付ける
 resource "google_service_account_iam_member" "wif_binding" {
   service_account_id = google_service_account.github_actions_sa.name
   role               = "roles/iam.workloadIdentityUser"
-  # 特定のGitHubリポジトリやブランチに絞ることを強く推奨
-  # 例: "principalSet://iam.googleapis.com/{pool_id}/attribute.repository/{owner}/{repo}"
-  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.repository/your-github-org/your-repo-name"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.repository/${var.github_repository}"
 }
 
 # --- 出力 ---
@@ -198,4 +250,9 @@ output "workload_identity_provider" {
 output "service_account_email" {
   description = "The email of the service account for GitHub Actions."
   value       = google_service_account.github_actions_sa.email
+}
+
+output "tfstate_bucket_name" {
+  description = "The name of the GCS bucket for Terraform state."
+  value       = google_storage_bucket.tfstate.name
 }

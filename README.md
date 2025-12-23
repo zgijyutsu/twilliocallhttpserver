@@ -1,111 +1,154 @@
-# 一斉電話発信アプリケーション (Cloud Run & CI/CD対応版)
+# Twilio 一斉架電サーバー
 
-## 概要
+これは、[Twilio](https://www.twilio.com/ja/) を利用して、指定した複数の電話番号に一斉に電話を発信する Flask アプリケーションです。
+Google Cloud Run 上での動作を想定しており、Terraform によるインフラのコード化 (IaC) と、GitHub Actions を用いた CI/CD パイプラインが構築されています。
 
-このアプリケーションは、Twilio APIを利用して、指定された複数の電話番号に一斉に電話を発信するFlaskアプリケーションです。
+## アーキテクチャ概要
 
-Google Cloud Runでの運用を前提としており、インフラストラクチャの構築はTerraformによってコード管理されています。
-また、GitHub Actionsを用いたCI/CDパイプラインが設定されており、`main`ブランチにコードをプッシュするだけで、自動的にDockerイメージのビルドとCloud Runへのデプロイが実行されます。
+![architecture_diagram](https'://user-images.githubusercontent.com/12345/67890.png')
+<!-- ↑ あとで画像へのリンクを貼る -->
 
-**重要：** このリポジトリをそのまま利用する場合、CI/CDは自動では実行されません。CI/CDを有効にするには、手動で設定を変更する必要があります。詳細は[ステップ5: CI/CDの有効化とデプロイ](#ステップ5-cicdの有効化とデプロイ)を参照してください。
+- **ソースコード管理**: GitHub
+- **CI/CD**: GitHub Actions
+- **コンテナイメージ管理**: Google Artifact Registry
+- **アプリケーション実行環境**: Google Cloud Run
+- **機密情報管理**: Google Secret Manager
+- **認証**:
+    - **Cloud Run へのアクセス**: HTTP Basic 認証
+    - **GitHub Actions から Google Cloud へ**: Workload Identity Federation (WIF)
 
-## 特徴
+## 主な機能
 
-- **インフラのコード化 (IaC):** Terraformを用いてCloud Run、Artifact Registry、Secret ManagerなどのGoogle Cloudリソースを宣言的に管理します。
-- **自動デプロイ:** GitHub Actionsにより、`main`ブランチへのプッシュをトリガーに、ビルドからデプロイまでを自動化します。
-- **セキュアな認証:** Workload Identity Federationを利用し、サービスアカウントキー（JSONファイル）を使わずにGitHub ActionsからGoogle Cloudへ安全に認証します。
-- **機密情報の保護:** Twilioの認証情報などの機密情報は、Secret Managerで安全に管理し、実行時にコンテナへ環境変数として渡されます。
+- **環境変数からの設定**:
+    - Twilio アカウント情報 (SID, Auth Token)
+    - 発信元・発信先の電話番号
+    - Basic 認証のユーザー名・パスワード
+- **複数番号への一斉発信**: 環境変数 `TO_PHONE_NUMBER` にカンマ区切りで複数の番号を指定できます。
+- **HTTPS 強制**: `main.py` で、Cloud Run のようなリバースプロキシ環境下でも適切にリクエストの `scheme` を判定し、本番環境では HTTPS を強制します。
+- **コンテナ化**: `Dockerfile` により、アプリケーションの実行環境をコンテナとして定義しています。
+- **IaC**: Terraform を使用して、以下の Google Cloud リソースをコードで管理します。
+    - Cloud Run サービス
+    - Artifact Registry リポジトリ
+    - Secret Manager のシークレット定義
+    - Workload Identity Federation の設定
+    - GitHub Actions 用のサービスアカウントと権限 (IAM)
+    - Terraform の状態 (state) を保存する GCS バケット
+- **自動デプロイ**:
+    - `main` ブランチへの push をトリガーに、GitHub Actions が起動します。
+    - Terraform を実行してインフラを構成 (`terraform apply`)。
+    - Docker イメージをビルドし、Artifact Registry へ push。
+    - 新しいイメージを Cloud Run へデプロイ。
 
 ---
 
-## 構築・デプロイ手順
+## 🛠️ セットアップ手順
 
-### ステップ1: 事前準備
+このプロジェクトをあなたの環境で動かすためには、いくつかの事前準備が必要です。
 
-1.  **Google Cloud プロジェクトの準備:**
-    -   課金が有効になっているGoogle Cloudプロジェクトを用意します。
-    -   以下のAPIを有効化しておきます。
-        -   Cloud Run API (`run.googleapis.com`)
-        -   Artifact Registry API (`artifactregistry.googleapis.com`)
-        -   Secret Manager API (`secretmanager.googleapis.com`)
-        -   IAM API (`iam.googleapis.com`)
-        -   Cloud Build API (`cloudbuild.googleapis.com`) ※Artifact Registryが内部で使用
+### 1. Google Cloud プロジェクトの準備
 
-2.  **ツールのインストール:**
-    -   [Terraform](https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli)
-    -   [Google Cloud SDK (gcloud)](https://cloud.google.com/sdk/docs/install)
+1.  Google Cloud プロジェクトを作成または選択します。
+2.  以下の API を有効にします。
+    - Cloud Run API (`run.googleapis.com`)
+    - Artifact Registry API (`artifactregistry.googleapis.com`)
+    - Secret Manager API (`secretmanager.googleapis.com`)
+    - Cloud Resource Manager API (`cloudresourcemanager.googleapis.com`)
+    - Identity and Access Management (IAM) API (`iam.googleapis.com`)
+    - Cloud Storage API (`storage.googleapis.com`)
+3.  プロジェクトで課金を有効にします。
 
-3.  **gcloud CLIの認証:**
+### 2. GitHub リポジトリの準備
+
+1.  このリポジトリを自身の GitHub アカウントにフォークまたはクローンします。
+2.  リポジトリの **[Settings] > [Secrets and variables] > [Actions]** に進み、以下の **Repository secrets** を登録します。これらは GitHub Actions のワークフローから参照されます。
+
+| シークレット名 | 説明 |
+| :--- | :--- |
+| `PROJECT_ID` | あなたの Google Cloud プロジェクト ID。 |
+| `WIF_PROVIDER` | Workload Identity Pool Provider のリソース名。<br>Terraform apply 後に出力される `workload_identity_provider` の値を設定します。 |
+| `WIF_SERVICE_ACCOUNT` | GitHub Actions が使用するサービスアカウントのメールアドレス。<br>Terraform apply 後に出力される `service_account_email` の値を設定します。 |
+
+### 3. Terraform の初期設定と初回デプロイ
+
+Terraform の state は GCS バケットで管理されますが、そのバケット自体を最初に作成する必要があります。
+**この初回セットアップは、Google Cloud プロジェクトのオーナー権限を持つアカウントで実行してください。**
+
+1.  **ローカル環境の準備**:
+    - `gcloud` CLI をインストール・初期化します (`gcloud init`)。
+    - Terraform CLI をインストールします。
+
+2.  **Terraform の実行**:
+    リポジトリのルートで以下のコマンドを実行します。
+
     ```bash
-    gcloud auth login
-    gcloud config set project YOUR_PROJECT_ID
-    ```
+    # Google Cloud にログイン
+    gcloud auth application-default login
 
-### ステップ2: Terraformによるインフラ構築
+    # 環境変数を設定
+    export TF_VAR_project_id="YOUR_PROJECT_ID"
+    export TF_VAR_github_repository="YOUR_GITHUB_OWNER/YOUR_GITHUB_REPO"
 
-1.  `terraform`ディレクトリに移動します。
-    ```bash
+    # Terraform を初期化
+    # バックエンド (GCS) の設定もここで行う
     cd terraform
-    ```
-
-2.  `terraform.tfvars`ファイルを作成し、ご自身のプロジェクトIDを記述します。
-    ```tfvars
-    # terraform.tfvars
-    project_id = "your-gcp-project-id"
-    ```
-    また、`main.tf`内の`google_service_account_iam_member.wif_binding`リソースにある`member`の末尾をご自身のGitHubリポジトリ名 (`your-github-org/your-repo-name`) に書き換えてください。
-
-3.  Terraformを初期化し、実行計画を確認、適用します。
-    ```bash
     terraform init
-    terraform plan
+
+    # state を保存するための GCS バケットを作成
+    terraform apply -target=google_storage_bucket.tfstate
+
+    # GCS バックエンドを有効にして再度初期化
+    terraform init -migrate-state
+
+    # 全てのリソースをデプロイ
     terraform apply
     ```
 
-4.  実行後、**2つの重要な値**が出力されます。これらは次のステップで使用するため、必ず控えておいてください。
-    -   `workload_identity_provider`
-    -   `service_account_email`
+3.  **GitHub Secrets の設定**:
+    `terraform apply` の最後に出力される `workload_identity_provider` と `service_account_email` の値を、ステップ 2-2 で説明した GitHub の `WIF_PROVIDER` と `WIF_SERVICE_ACCOUNT` にそれぞれ設定します。
 
-### ステップ3: GitHub Actions の Secrets 設定
+### 4. Secret Manager への機密情報の登録
 
-1.  デプロイ対象のGitHubリポジトリで、`Settings` > `Secrets and variables` > `Actions` に移動します。
-
-2.  `New repository secret`をクリックし、以下の2つのSecretを登録します。
-    -   **`WIF_PROVIDER`**: Terraformの出力 `workload_identity_provider` の値を設定します。
-    -   **`WIF_SERVICE_ACCOUNT`**: Terraformの出力 `service_account_email` の値を設定します。
-
-3.  `.github/workflows/deploy.yml.template`内の`PROJECT_ID`をご自身のものに書き換えるか、同様にActions Secretとして登録して `${{ secrets.PROJECT_ID }}` のように参照を修正してください。
-
-### ステップ4: 機密情報 (Twilio情報など) の設定
-
-TerraformはSecret Managerにシークレットの「入れ物」を作成しただけなので、中に実際の値を入れる必要があります。
-
-1.  Google Cloudコンソールの[Secret Managerページ](https://console.cloud.google.com/security/secret-manager)に移動します。
-2.  Terraformが作成した `TWILIO_ACCOUNT_SID` と `TWILIO_AUTH_TOKEN` という名前のシークレットがそれぞれ存在します。
-3.  各シークレットを選択し、「新しいバージョンの追加」から、ご自身のTwilioアカウント情報を**シークレットの値**として入力・保存します。
-
-**その他の環境変数について:**
-`APP_USER`, `APP_PASSWORD`, `FROM_PHONE_NUMBER`, `TO_PHONE_NUMBER` については、Cloud Runサービスのコンソール画面から直接環境変数として設定するか、同様にSecret Managerで管理し、`terraform/main.tf`を編集してコンテナに渡すようにしてください。
-
-### ステップ5: CI/CDの有効化とデプロイ
-
-このテンプレートリポジトリでは、CI/CDワークフローはデフォルトで無効になっています。
-有効にするには、以下の手順でファイル名を変更してください。
-
-1.  `.github/workflows/` ディレクトリにある `deploy.yml.template` ファイルの名前を `deploy.yml` に変更します。
-    ```bash
-    mv .github/workflows/deploy.yml.template .github/workflows/deploy.yml
-    ```
-
-2.  ファイル名を変更した後、`main`ブランチにコミットをプッシュすると、自動的にGitHub Actionsのワークフローが開始されます。
-
-Actionsの実行ログで、ビルドとデプロイの進捗を確認できます。
-デプロイが成功すると、Cloud RunサービスのURLが発行され、アプリケーションが利用可能になります。
-
-## アプリケーションのトリガー方法
-
-Cloud Runから提供されるHTTPS URLに対して、Basic認証情報と共にGETまたはPOSTリクエストを送信することで、電話発信が開始されます。
+以下の機密情報を Google Cloud の Secret Manager に登録します。
+`gcloud` コマンドを使用する例を示します。
 
 ```bash
-curl -u "your_username:your_password" https://your-cloud-run-service-url/
+PROJECT_ID="YOUR_PROJECT_ID"
+
+# Twilio 認証情報
+gcloud secrets versions add TWILIO_ACCOUNT_SID --data-file=- --project=$PROJECT_ID <<< "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+gcloud secrets versions add TWILIO_AUTH_TOKEN --data-file=- --project=$PROJECT_ID <<< "your_twilio_auth_token"
+
+# Basic 認証情報
+gcloud secrets versions add APP_USER --data-file=- --project=$PROJECT_ID <<< "user"
+gcloud secrets versions add APP_PASSWORD --data-file=- --project=$PROJECT_ID <<< "password"
+
+# 電話番号
+gcloud secrets versions add FROM_PHONE_NUMBER --data-file=- --project=$PROJECT_ID <<< "+15005550006"
+gcloud secrets versions add TO_PHONE_NUMBER --data-file=- --project=$PROJECT_ID <<< "+819012345678,+818012345678"
+```
+
+**注意**: 上記の値はダミーです。ご自身の情報に置き換えてください。
+
+### 5. デプロイの実行
+
+これで全ての準備が整いました。
+`main` ブランチに push すると、GitHub Actions が自動的にトリガーされ、Cloud Run へのデプロイが実行されます。
+
+---
+
+## 📞 アプリケーションの実行方法
+
+デプロイが成功すると、Cloud Run サービスの URL が発行されます。
+このエンドポイントに対して、Basic 認証の情報を付与して POST リクエストを送信することで、電話が発信されます。
+
+```bash
+# 環境変数を設定
+SERVICE_URL=$(gcloud run services describe twilio-call-server --platform managed --region asia-northeast1 --format 'value(status.url)')
+APP_USER=$(gcloud secrets versions access latest --secret="APP_USER" --project="YOUR_PROJECT_ID")
+APP_PASSWORD=$(gcloud secrets versions access latest --secret="APP_PASSWORD" --project="YOUR_PROJECT_ID")
+
+# cURL を使ってリクエスト
+curl -X POST $SERVICE_URL \
+     -u "$APP_USER:$APP_PASSWORD" \
+     -v
 ```
