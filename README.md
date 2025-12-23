@@ -7,6 +7,8 @@
 Google Cloud Runでの運用を前提としており、インフラストラクチャの構築はTerraformによってコード管理されています。
 また、GitHub Actionsを用いたCI/CDパイプラインが設定されており、`main`ブランチにコードをプッシュするだけで、自動的にDockerイメージのビルドとCloud Runへのデプロイが実行されます。
 
+**重要：** このリポジトリをそのまま利用する場合、CI/CDは自動では実行されません。CI/CDを有効にするには、手動で設定を変更する必要があります。詳細は[ステップ5: CI/CDの有効化とデプロイ](#ステップ5-cicdの有効化とデプロイ)を参照してください。
+
 ## 特徴
 
 - **インフラのコード化 (IaC):** Terraformを用いてCloud Run、Artifact Registry、Secret ManagerなどのGoogle Cloudリソースを宣言的に管理します。
@@ -72,7 +74,7 @@ Google Cloud Runでの運用を前提としており、インフラストラク�
     -   **`WIF_PROVIDER`**: Terraformの出力 `workload_identity_provider` の値を設定します。
     -   **`WIF_SERVICE_ACCOUNT`**: Terraformの出力 `service_account_email` の値を設定します。
 
-3.  `.github/workflows/deploy.yml`内の`PROJECT_ID`をご自身のものに書き換えるか、同様にActions Secretとして登録して `${{ secrets.PROJECT_ID }}` のように参照を修正してください。
+3.  `.github/workflows/deploy.yml.template`内の`PROJECT_ID`をご自身のものに書き換えるか、同様にActions Secretとして登録して `${{ secrets.PROJECT_ID }}` のように参照を修正してください。
 
 ### ステップ4: 機密情報 (Twilio情報など) の設定
 
@@ -85,11 +87,19 @@ TerraformはSecret Managerにシークレットの「入れ物」を作成した
 **その他の環境変数について:**
 `APP_USER`, `APP_PASSWORD`, `FROM_PHONE_NUMBER`, `TO_PHONE_NUMBER` については、Cloud Runサービスのコンソール画面から直接環境変数として設定するか、同様にSecret Managerで管理し、`terraform/main.tf`を編集してコンテナに渡すようにしてください。
 
-### ステップ5: デプロイの実行
+### ステップ5: CI/CDの有効化とデプロイ
 
-`main`ブランチにコミットをプッシュすると、自動的にGitHub Actionsのワークフローが開始されます。
+このテンプレートリポジトリでは、CI/CDワークフローはデフォルトで無効になっています。
+有効にするには、以下の手順でファイル名を変更してください。
+
+1.  `.github/workflows/` ディレクトリにある `deploy.yml.template` ファイルの名前を `deploy.yml` に変更します。
+    ```bash
+    mv .github/workflows/deploy.yml.template .github/workflows/deploy.yml
+    ```
+
+2.  ファイル名を変更した後、`main`ブランチにコミットをプッシュすると、自動的にGitHub Actionsのワークフローが開始されます。
+
 Actionsの実行ログで、ビルドとデプロイの進捗を確認できます。
-
 デプロイが成功すると、Cloud RunサービスのURLが発行され、アプリケーションが利用可能になります。
 
 ## アプリケーションのトリガー方法
